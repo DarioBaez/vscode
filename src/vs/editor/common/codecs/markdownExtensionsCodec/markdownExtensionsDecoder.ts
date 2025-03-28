@@ -3,71 +3,53 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { MarkdownToken } from './tokens/markdownToken.js';
+import { Dash } from '../simpleCodec/tokens/dash.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { LeftBracket } from '../simpleCodec/tokens/brackets.js';
-import { PartialMarkdownImage } from './parsers/markdownImage.js';
 import { ReadableStream } from '../../../../base/common/stream.js';
-import { TSimpleDecoderToken } from '../simpleCodec/simpleDecoder.js';
-import { LeftAngleBracket } from '../simpleCodec/tokens/angleBrackets.js';
-import { ExclamationMark } from '../simpleCodec/tokens/exclamationMark.js';
 import { BaseDecoder } from '../../../../base/common/codecs/baseDecoder.js';
-import { MarkdownCommentStart, PartialMarkdownCommentStart } from './parsers/markdownComment.js';
-import { MarkdownExtensionsDecoder } from '../markdownExtensionsCodec/markdownExtensionsDecoder.js';
-import { MarkdownLinkCaption, PartialMarkdownLink, PartialMarkdownLinkCaption } from './parsers/markdownLink.js';
+import { MarkdownExtensionsToken } from './tokens/markdownExtensionsToken.js';
+import { SimpleDecoder, TSimpleDecoderToken } from '../simpleCodec/simpleDecoder.js';
+import { PartialFrontMatterHeader, PartialFrontMatterStartMarker } from './parsers/frontMatterHeader.js';
+
+/**
+ * TODO: @legomushroom - list
+ * - use the decoder
+ * - add tests
+ */
 
 /**
  * Tokens produced by this decoder.
  */
-export type TMarkdownToken = MarkdownToken | TSimpleDecoderToken;
+export type TMarkdownExtensionsToken = MarkdownExtensionsToken | TSimpleDecoderToken;
 
 /**
- * Decoder capable of parsing markdown entities (e.g., links) from a sequence of simple tokens.
+ * TODO: @legomushroom
  */
-export class MarkdownDecoder extends BaseDecoder<TMarkdownToken, TSimpleDecoderToken> {
+export class MarkdownExtensionsDecoder extends BaseDecoder<TMarkdownExtensionsToken, TSimpleDecoderToken> {
 	/**
 	 * Current parser object that is responsible for parsing a sequence of tokens into
 	 * some markdown entity. Set to `undefined` when no parsing is in progress at the moment.
 	 */
-	private current?:
-		PartialMarkdownLinkCaption | MarkdownLinkCaption | PartialMarkdownLink |
-		PartialMarkdownCommentStart | MarkdownCommentStart |
-		PartialMarkdownImage;
+	private current?: PartialFrontMatterStartMarker | PartialFrontMatterHeader;
 
 	constructor(
 		stream: ReadableStream<VSBuffer>,
 	) {
-		super(new MarkdownExtensionsDecoder(stream));
+		super(new SimpleDecoder(stream));
 	}
 
 	protected override onStreamData(token: TSimpleDecoderToken): void {
 		// `markdown links` start with `[` character, so here we can
 		// initiate the process of parsing a markdown link
-		if (token instanceof LeftBracket && !this.current) {
-			this.current = new PartialMarkdownLinkCaption(token);
+		if (token instanceof Dash && !this.current) {
+			this.current = new PartialFrontMatterStartMarker(token);
 
 			return;
 		}
 
-		// `markdown comments` start with `<` character, so here we can
-		// initiate the process of parsing a markdown comment
-		if (token instanceof LeftAngleBracket && !this.current) {
-			this.current = new PartialMarkdownCommentStart(token);
-
-			return;
-		}
-
-		// `markdown image links` start with `!` character, so here we can
-		// initiate the process of parsing a markdown image
-		if (token instanceof ExclamationMark && !this.current) {
-			this.current = new PartialMarkdownImage(token);
-
-			return;
-		}
-
-		// if current parser was not initiated before, - we are not inside a sequence
-		// of tokens we care about, therefore re-emit the token immediately and continue
-		if (!this.current) {
+		// if current parser is not initiated, - we are not inside a sequence of tokens
+		// we care about, therefore re-emit the token immediately and continue
+		if (this.current === undefined) {
 			this._onData.fire(token);
 			return;
 		}
@@ -80,7 +62,7 @@ export class MarkdownDecoder extends BaseDecoder<TMarkdownToken, TSimpleDecoderT
 
 			// if got a fully parsed out token back, emit it and reset
 			// the current parser object so a new parsing process can start
-			if (nextParser instanceof MarkdownToken) {
+			if (nextParser instanceof MarkdownExtensionsToken) {
 				this._onData.fire(nextParser);
 				delete this.current;
 			} else {
@@ -90,7 +72,7 @@ export class MarkdownDecoder extends BaseDecoder<TMarkdownToken, TSimpleDecoderT
 		} else {
 			// if failed to parse a sequence of a tokens as a single markdown
 			// entity (e.g., a link), re-emit the tokens accumulated so far
-			// then reset the current parser object
+			// then reset the currently initialized parser object
 			for (const token of this.current.tokens) {
 				this._onData.fire(token);
 				delete this.current;
@@ -109,13 +91,15 @@ export class MarkdownDecoder extends BaseDecoder<TMarkdownToken, TSimpleDecoderT
 		// if the stream has ended and there is a current incomplete parser
 		// object present, handle the remaining parser object
 		if (this.current) {
-			// if a `markdown comment` does not have an end marker `-->`
-			// it is still a comment that extends to the end of the file
-			// so re-emit the current parser as a comment token
-			if (this.current instanceof MarkdownCommentStart) {
-				this._onData.fire(this.current.asMarkdownComment());
-				delete this.current;
-				return this.onStreamEnd();
+			// if current parser can be converted into a valid Front Matter
+			// header, then emit it and reset the current parser object
+			if (this.current instanceof PartialFrontMatterHeader) {
+				const maybeHeader = this.current.asFrontMatterHeader();
+				if (maybeHeader) {
+					this._onData.fire(maybeHeader);
+					delete this.current;
+					return;
+				}
 			}
 
 			// in all other cases, re-emit existing parser tokens
